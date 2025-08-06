@@ -74,9 +74,9 @@ app.get('/sync-products', async (req, res) => {
     }
 
     res.json({ message: 'Productos sincronizados exitosamente' });
-  } catch (error) {
-    console.error('Error sincronizando productos:', error.message);
-    res.status(500).json({ error: 'Error al sincronizar productos' });
+  } catch (err) {
+  console.error('Error completo:', err.response?.data || err.message);
+  res.status(500).json({ error: err.response?.data || err.message });
   }
 });
 
