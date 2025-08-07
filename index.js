@@ -6,8 +6,22 @@ const { Pool } = require('pg');
 
 const app = express();
 
+const allowedOrigins = [
+  'https://app.bikesultoursgest.com',
+  'https://api.bikesultoursgest.com'
+];
+
 app.use(cors({
-  origin: 'https://app.bikesultoursgest.com',
+  origin: function (origin, callback) {
+    // Permitir sin Origin (como Postman o curl)
+    if (!origin) return callback(null, true);
+
+    if (allowedOrigins.includes(origin)) {
+      callback(null, true);
+    } else {
+      callback(new Error('Not allowed by CORS: ' + origin));
+    }
+  },
   methods: ['GET', 'POST', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization'],
   credentials: true
