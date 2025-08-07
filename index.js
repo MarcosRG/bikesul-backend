@@ -5,8 +5,16 @@ const cors = require('cors');
 const { Pool } = require('pg');
 
 const app = express();
-app.use(cors());
+
+app.use(cors({
+  origin: 'https://app.bikesultoursgest.com',
+  methods: ['GET', 'POST', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
+  credentials: true
+}));
+
 app.use(express.json());
+
 
 const db = new Pool({
   connectionString: process.env.DATABASE_URL,
