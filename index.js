@@ -6,36 +6,44 @@ const { Pool } = require('pg');
 
 const app = express();
 
+// Orígenes permitidos
 const allowedOrigins = [
   'https://app.bikesultoursgest.com',
   'https://api.bikesultoursgest.com'
 ];
 
+// Middleware CORS global
 app.use(cors({
   origin: function (origin, callback) {
-    // Permitir sin Origin (como Postman o curl)
+    // Permitir llamadas sin origin (como Postman)
     if (!origin) return callback(null, true);
-
-    if (allowedOrigins.includes(origin)) {
-      callback(null, true);
-    } else {
-      callback(new Error('Not allowed by CORS: ' + origin));
-    }
+    if (allowedOrigins.includes(origin)) return callback(null, true);
+    return callback(new Error('Not allowed by CORS: ' + origin));
   },
   methods: ['GET', 'POST', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'User-Agent'],
   credentials: true
 }));
 
+// Middleware para manejar OPTIONS (preflight) en todas las rutas
+app.options('*', cors());
+
 app.use(express.json());
 
-
+// PostgreSQL
 const db = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: { rejectUnauthorized: false }
 });
 
-// Sincronizar productos de WooCommerce a Neon
+
+// 🔹 Endpoint nuevo: /health (expone estado del backend)
+app.get('/health', (req, res) => {
+  res.json({ status: 'ok', timestamp: new Date().toISOString() });
+});
+
+
+// 🔹 Sincronizar productos desde WooCommerce
 app.get('/sync-products', async (req, res) => {
   try {
     const response = await axios.get(`${process.env.WOOCOMMERCE_API_BASE}/products`, {
@@ -97,12 +105,13 @@ app.get('/sync-products', async (req, res) => {
 
     res.json({ message: 'Productos sincronizados exitosamente' });
   } catch (err) {
-  console.error('Error completo:', err.response?.data || err.message);
-  res.status(500).json({ error: err.response?.data || err.message });
+    console.error('Error completo:', err.response?.data || err.message);
+    res.status(500).json({ error: err.response?.data || err.message });
   }
 });
 
-// Obtener productos
+
+// 🔹 Obtener productos
 app.get('/products', async (req, res) => {
   try {
     const result = await db.query('SELECT * FROM products ORDER BY created_at DESC');
@@ -113,8 +122,9 @@ app.get('/products', async (req, res) => {
   }
 });
 
+
+// 🔹 Start
 const PORT = process.env.PORT || 4000;
 app.listen(PORT, () => {
   console.log(`Servidor backend escuchando en puerto ${PORT}`);
 });
-
