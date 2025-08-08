@@ -140,10 +140,17 @@ function processProductForResponse(dbProduct) {
   }
 }
 
-// 🔹 Endpoint de saúde
+// 🔹 Endpoint de saúde con cache headers
 app.get('/health', (req, res) => {
-  res.json({ 
-    status: 'ok', 
+  // Headers para health check (cache corto)
+  res.set({
+    'Cache-Control': 'public, max-age=60, s-maxage=120', // 1min browser, 2min CDN
+    'CF-Cache-Tag': 'health,system',
+    'X-Cache-Status': 'CACHE-ENABLED'
+  });
+
+  res.json({
+    status: 'ok',
     timestamp: new Date().toISOString(),
     service: 'BikesSul Backend - Alugueres Filter',
     version: '2.0.0'
@@ -245,8 +252,17 @@ app.get('/sync-products', async (req, res) => {
       total_products: products.length,
       error_count: errorCount,
       timestamp: new Date().toISOString(),
-      category_filter: 'ALUGUERES (ID: 319)'
+      category_filter: 'ALUGUERES (ID: 319)',
+      cache_invalidated: true // Indica que el cache debe invalidarse
     };
+
+    // Headers para invalidar cache después de sync
+    res.set({
+      'Cache-Control': 'no-cache, no-store, must-revalidate',
+      'X-Cache-Invalidate': 'products,alugueres,bikesul',
+      'X-Sync-Complete': 'true',
+      'CF-Cache-Tag': 'sync,system'
+    });
 
     console.log('✅ Sincronização completada:', result);
     res.json(result);
@@ -260,10 +276,22 @@ app.get('/sync-products', async (req, res) => {
   }
 });
 
-// 🔹 Obtener produtos (SOLO ALUGUERES filtrados)
+// 🔹 Obtener produtos (SOLO ALUGUERES filtrados) con cache headers para Cloudflare
 app.get('/products', async (req, res) => {
   try {
     const { category } = req.query;
+
+    // Headers de cache para Cloudflare (Cache global instantáneo)
+    res.set({
+      'Cache-Control': 'public, max-age=300, s-maxage=900', // 5min browser, 15min CDN
+      'CF-Cache-Tag': 'products,alugueres,bikesul', // Tags para invalidación selectiva
+      'Vary': 'Accept-Encoding', // Compresión diferenciada
+      'ETag': `"products-${Date.now()}"`, // ETag para validación
+      'Last-Modified': new Date().toUTCString(), // Última modificación
+      'X-Cache-Status': 'CACHE-ENABLED', // Header de debug
+      'X-Content-Type-Options': 'nosniff', // Seguridad
+      'X-Frame-Options': 'DENY' // Seguridad
+    });
     
     let query = `
       SELECT * FROM products 
@@ -299,11 +327,21 @@ app.get('/products', async (req, res) => {
   }
 });
 
-// 🔹 Obtener produto específico por ID
+// 🔹 Obtener produto específico por ID con cache headers
 app.get('/products/:id', async (req, res) => {
   try {
     const { id } = req.params;
     console.log(`🔍 Buscando produto ${id}...`);
+
+    // Headers de cache para producto específico (cache más largo)
+    res.set({
+      'Cache-Control': 'public, max-age=600, s-maxage=1800', // 10min browser, 30min CDN
+      'CF-Cache-Tag': `product-${id},products,alugueres,bikesul`,
+      'Vary': 'Accept-Encoding',
+      'ETag': `"product-${id}-${Date.now()}"`,
+      'Last-Modified': new Date().toUTCString(),
+      'X-Cache-Status': 'CACHE-ENABLED'
+    });
     
     const result = await db.query(
       `SELECT * FROM products 
@@ -362,12 +400,23 @@ app.get('/sync-status', async (req, res) => {
   }
 });
 
-// 🔹 Endpoint para limpeza de cache (útil após sincronização)
+// 🔹 Endpoint para limpeza de cache Cloudflare (útil após sincronização)
 app.post('/clear-cache', (req, res) => {
   console.log('🧹 Cache clearing request received');
-  res.json({ 
-    success: true, 
-    message: 'Cache clear signal sent',
+
+  // Headers para forzar no-cache en este endpoint
+  res.set({
+    'Cache-Control': 'no-cache, no-store, must-revalidate',
+    'Pragma': 'no-cache',
+    'Expires': '0',
+    'CF-Cache-Tag': 'cache-control',
+    'X-Cache-Invalidate': 'products,alugueres,bikesul' // Indica qué invalidar
+  });
+
+  res.json({
+    success: true,
+    message: 'Cache clear signal sent to Cloudflare',
+    invalidated_tags: ['products', 'alugueres', 'bikesul'],
     timestamp: new Date().toISOString()
   });
 });
