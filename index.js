@@ -61,21 +61,47 @@ function parseJSONSafe(value, fallback) {
 
 function extractACFPricing(acfData, metaData = []) {
   const pricing = {};
+  
+  // Primero intentar desde ACF data
   if (acfData && typeof acfData === 'object') {
-    if (acfData.precio_1_2) pricing.precio_1_2 = Number(acfData.precio_1_2);
-    if (acfData.precio_3_6) pricing.precio_3_6 = Number(acfData.precio_3_6);
-    if (acfData.precio_7_mais) pricing.precio_7_mais = Number(acfData.precio_7_mais);
+    if (acfData.precio_1_2 !== undefined && acfData.precio_1_2 !== null && acfData.precio_1_2 !== '') {
+      pricing.precio_1_2 = Number(acfData.precio_1_2);
+    }
+    if (acfData.precio_3_6 !== undefined && acfData.precio_3_6 !== null && acfData.precio_3_6 !== '') {
+      pricing.precio_3_6 = Number(acfData.precio_3_6);
+    }
+    if (acfData.precio_7_mais !== undefined && acfData.precio_7_mais !== null && acfData.precio_7_mais !== '') {
+      pricing.precio_7_mais = Number(acfData.precio_7_mais);
+    }
   }
+  
+  // Si no encontramos nada en ACF, intentar en meta_data
   if (Object.keys(pricing).length === 0 && Array.isArray(metaData)) {
     metaData.forEach(meta => {
+      if (!meta || typeof meta !== 'object') return;
+      
       const key = meta.key || meta.name || '';
       const val = meta.value !== undefined ? meta.value : meta.val;
-      if (!val) return;
-      if (key === 'precio_1_2' || key === '_precio_1_2') pricing.precio_1_2 = Number(val);
-      if (key === 'precio_3_6' || key === '_precio_3_6') pricing.precio_3_6 = Number(val);
-      if (key === 'precio_7_mais' || key === '_precio_7_mais') pricing.precio_7_mais = Number(val);
+      
+      if (val === undefined || val === null || val === '') return;
+      
+      // Verificar tanto con underscore como sin underscore
+      if (key === 'precio_1_2' || key === '_precio_1_2') {
+        const numVal = Number(val);
+        if (!isNaN(numVal) && numVal > 0) pricing.precio_1_2 = numVal;
+      }
+      if (key === 'precio_3_6' || key === '_precio_3_6') {
+        const numVal = Number(val);
+        if (!isNaN(numVal) && numVal > 0) pricing.precio_3_6 = numVal;
+      }
+      if (key === 'precio_7_mais' || key === '_precio_7_mais') {
+        const numVal = Number(val);
+        if (!isNaN(numVal) && numVal > 0) pricing.precio_7_mais = numVal;
+      }
     });
   }
+  
+  console.log(`🔍 ACF Pricing extraído:`, pricing);
   return pricing;
 }
 
@@ -172,6 +198,91 @@ async function fetchVariationsFromWoo(productId) {
   return all;
 }
 
+// ===== RUTA HEALTH (FALTABA) =====
+app.get('/health', (req, res) => {
+  console.log('💓 Health check solicitado');
+  res.json({ 
+    status: 'ok', 
+    timestamp: new Date().toISOString(),
+    uptime: process.uptime(),
+    message: 'Backend Render está operacional'
+  });
+});
+
+// ===== RUTA GET PRODUCTS (FALTABA) =====
+app.get('/products', async (req, res) => {
+  console.log('📦 Solicitando productos desde la base de datos...');
+  
+  try {
+    const category = req.query.category;
+    let query;
+    let queryParams = [];
+
+    if (category) {
+      // Filtrar por categoría específica
+      query = `
+        SELECT * FROM products 
+        WHERE categories::text ILIKE $1 
+        AND status = 'publish'
+        ORDER BY name ASC
+      `;
+      queryParams = [`%"slug":"${category}"%`];
+      console.log(`🔍 Filtrando por categoría: ${category}`);
+    } else {
+      // Obtener todos los productos de la categoría "alugueres"
+      query = `
+        SELECT * FROM products 
+        WHERE categories::jsonb @> '[{"id": ${ALUGUERES_CATEGORY_ID}}]'
+        AND status = 'publish'
+        ORDER BY name ASC
+      `;
+      console.log(`📋 Obteniendo todos los productos de ALUGUERES (${ALUGUERES_CATEGORY_ID})`);
+    }
+
+    const { rows } = await db.query(query, queryParams);
+    console.log(`✅ ${rows.length} productos encontrados en la base de datos`);
+
+    const responseProducts = rows.map(processProductForResponse);
+    
+    res.json(responseProducts);
+  } catch (error) {
+    console.error('❌ Error obteniendo productos:', error);
+    res.status(500).json({ 
+      error: 'Error interno del servidor',
+      message: error.message 
+    });
+  }
+});
+
+// ===== RUTA GET PRODUCT BY ID (FALTABA) =====
+app.get('/products/:id', async (req, res) => {
+  console.log(`🔍 Solicitando producto con ID: ${req.params.id}`);
+  
+  try {
+    const productId = req.params.id;
+    const { rows } = await db.query(
+      'SELECT * FROM products WHERE woocommerce_id = $1 OR id = $1', 
+      [productId]
+    );
+
+    if (rows.length === 0) {
+      console.log(`❌ Producto ${productId} no encontrado`);
+      return res.status(404).json({ error: 'Produto não encontrado' });
+    }
+
+    const responseProduct = processProductForResponse(rows[0]);
+    console.log(`✅ Producto ${productId} encontrado: ${responseProduct.name}`);
+    
+    res.json(responseProduct);
+  } catch (error) {
+    console.error(`❌ Error obteniendo producto ${req.params.id}:`, error);
+    res.status(500).json({ 
+      error: 'Error interno del servidor',
+      message: error.message 
+    });
+  }
+});
+
 app.get('/sync-products', async (req, res) => {
   console.log('🔄 Iniciando sincronización de productos (incluye variaciones)...');
 
@@ -213,6 +324,10 @@ app.get('/sync-products', async (req, res) => {
             continue;
           }
 
+          console.log(`📝 Procesando producto ${product.id}: ${product.name}`);
+          console.log(`🔍 ACF Data recibido:`, JSON.stringify(product.acf, null, 2));
+          console.log(`🔍 Meta Data recibido:`, JSON.stringify(product.meta_data, null, 2));
+
           let variationsStock = [];
           let variationsIds = [];
 
@@ -247,6 +362,7 @@ app.get('/sync-products', async (req, res) => {
           const metaData = product.meta_data || [];
 
           const acfPricing = extractACFPricing(acfData, metaData);
+          console.log(`💰 ACF Pricing extraído para ${product.id}:`, acfPricing);
 
           const priceToUse = acfPricing.precio_1_2 !== undefined ? Number(acfPricing.precio_1_2)
                             : (product.price !== undefined ? Number(product.price) : 0);
@@ -303,6 +419,8 @@ app.get('/sync-products', async (req, res) => {
             acfPricing.precio_7_mais || null
           ];
 
+          console.log(`💾 Guardando en BD - precios ACF: 1-2: ${values[16]}, 3-6: ${values[17]}, 7+: ${values[18]}`);
+
           await db.query(queryText, values);
           totalSynced++;
           console.log(`✅ Producto sincronizado: ${product.id} - ${product.name}`);
@@ -334,4 +452,7 @@ app.get('/sync-products', async (req, res) => {
 
 app.listen(PORT, () => {
   console.log(`🚀 Server listo en puerto ${PORT}`);
+  console.log(`💓 Health check disponible en: http://localhost:${PORT}/health`);
+  console.log(`📦 Productos disponibles en: http://localhost:${PORT}/products`);
+  console.log(`🔄 Sincronización disponible en: http://localhost:${PORT}/sync-products`);
 });
