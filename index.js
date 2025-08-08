@@ -198,31 +198,70 @@ async function fetchVariationsFromWoo(productId) {
   return all;
 }
 
-// ===== RUTA HEALTH (FALTABA) =====
+// ===== RUTA HEALTH =====
 app.get('/health', (req, res) => {
   console.log('💓 Health check solicitado');
-  res.json({ 
-    status: 'ok', 
+
+  // Headers CORS explícitos para health check
+  res.set({
+    'Access-Control-Allow-Origin': '*',
+    'Access-Control-Allow-Methods': 'GET, OPTIONS',
+    'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+    'Cache-Control': 'no-cache, no-store, must-revalidate',
+    'X-Health-Check': 'true'
+  });
+
+  res.json({
+    status: 'ok',
     timestamp: new Date().toISOString(),
     uptime: process.uptime(),
     message: 'Backend Render está operacional'
   });
 });
 
-// ===== RUTA GET PRODUCTS (FALTABA) =====
+// ===== RUTA STATUS (ALIAS DE HEALTH) =====
+app.get('/status', (req, res) => {
+  console.log('📊 Status check solicitado');
+
+  res.set({
+    'Access-Control-Allow-Origin': '*',
+    'Access-Control-Allow-Methods': 'GET, OPTIONS',
+    'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+    'Cache-Control': 'no-cache, no-store, must-revalidate',
+    'X-Status-Check': 'true'
+  });
+
+  res.json({
+    status: 'ok',
+    health: 'healthy',
+    timestamp: new Date().toISOString(),
+    uptime: process.uptime(),
+    message: 'Backend Render está operacional'
+  });
+});
+
+// ===== RUTA GET PRODUCTS =====
 app.get('/products', async (req, res) => {
   console.log('📦 Solicitando productos desde la base de datos...');
-  
+
   try {
     const category = req.query.category;
     let query;
     let queryParams = [];
 
+    // Headers para cache en Cloudflare
+    res.set({
+      'Cache-Control': 'public, max-age=300, s-maxage=600', // 5min browser, 10min CDN
+      'ETag': `products-${Date.now()}`,
+      'X-Cache-Strategy': 'cloudflare-cache',
+      'CF-Cache-Tag': 'products,alugueres,bikesul'
+    });
+
     if (category) {
       // Filtrar por categoría específica
       query = `
-        SELECT * FROM products 
-        WHERE categories::text ILIKE $1 
+        SELECT * FROM products
+        WHERE categories::text ILIKE $1
         AND status = 'publish'
         ORDER BY name ASC
       `;
@@ -231,7 +270,7 @@ app.get('/products', async (req, res) => {
     } else {
       // Obtener todos los productos de la categoría "alugueres"
       query = `
-        SELECT * FROM products 
+        SELECT * FROM products
         WHERE categories::jsonb @> '[{"id": ${ALUGUERES_CATEGORY_ID}}]'
         AND status = 'publish'
         ORDER BY name ASC
@@ -243,25 +282,33 @@ app.get('/products', async (req, res) => {
     console.log(`✅ ${rows.length} productos encontrados en la base de datos`);
 
     const responseProducts = rows.map(processProductForResponse);
-    
+
     res.json(responseProducts);
   } catch (error) {
     console.error('❌ Error obteniendo productos:', error);
-    res.status(500).json({ 
+    res.status(500).json({
       error: 'Error interno del servidor',
-      message: error.message 
+      message: error.message
     });
   }
 });
 
-// ===== RUTA GET PRODUCT BY ID (FALTABA) =====
+// ===== RUTA GET PRODUCT BY ID =====
 app.get('/products/:id', async (req, res) => {
   console.log(`🔍 Solicitando producto con ID: ${req.params.id}`);
-  
+
   try {
     const productId = req.params.id;
+
+    // Headers para cache individualizado
+    res.set({
+      'Cache-Control': 'public, max-age=600, s-maxage=1200', // 10min browser, 20min CDN
+      'ETag': `product-${productId}-${Date.now()}`,
+      'CF-Cache-Tag': `product-${productId},products,alugueres`
+    });
+
     const { rows } = await db.query(
-      'SELECT * FROM products WHERE woocommerce_id = $1 OR id = $1', 
+      'SELECT * FROM products WHERE woocommerce_id = $1 OR id = $1',
       [productId]
     );
 
@@ -272,13 +319,13 @@ app.get('/products/:id', async (req, res) => {
 
     const responseProduct = processProductForResponse(rows[0]);
     console.log(`✅ Producto ${productId} encontrado: ${responseProduct.name}`);
-    
+
     res.json(responseProduct);
   } catch (error) {
     console.error(`❌ Error obteniendo producto ${req.params.id}:`, error);
-    res.status(500).json({ 
+    res.status(500).json({
       error: 'Error interno del servidor',
-      message: error.message 
+      message: error.message
     });
   }
 });
@@ -450,9 +497,159 @@ app.get('/sync-products', async (req, res) => {
   }
 });
 
+// ===== ENDPOINT SYNC-STATUS =====
+app.get('/sync-status', async (req, res) => {
+  console.log('📊 Verificando status da sincronização...');
+
+  try {
+    // Headers para no-cache (siempre datos frescos)
+    res.set({
+      'Cache-Control': 'no-cache, no-store, must-revalidate',
+      'X-Sync-Status-Check': 'true'
+    });
+
+    // Contar productos en BD
+    const totalCount = await db.query('SELECT COUNT(*) as total FROM products');
+    const alugueresCount = await db.query(
+      `SELECT COUNT(*) as alugueres_total FROM products
+       WHERE categories::jsonb @> '[{"id": ${ALUGUERES_CATEGORY_ID}}]'`
+    );
+
+    const syncStatus = {
+      last_check: new Date().toISOString(),
+      total_products_in_db: parseInt(totalCount.rows[0].total),
+      alugueres_products: parseInt(alugueresCount.rows[0].alugueres_total),
+      category_filter: ALUGUERES_CATEGORY_ID,
+      sync_healthy: parseInt(alugueresCount.rows[0].alugueres_total) > 0
+    };
+
+    console.log('✅ Sync status:', syncStatus);
+    res.json(syncStatus);
+  } catch (error) {
+    console.error('❌ Error verificando sync status:', error);
+    res.status(500).json({
+      error: 'Error verificando status de sincronização',
+      message: error.message
+    });
+  }
+});
+
+// ===== ENDPOINT CORS-TEST =====
+app.get('/cors-test', (req, res) => {
+  console.log('🧪 CORS Test request received');
+  console.log('Origin:', req.get('Origin'));
+  console.log('User-Agent:', req.get('User-Agent'));
+
+  // Headers explícitos para teste CORS
+  res.set({
+    'Access-Control-Allow-Origin': '*',
+    'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
+    'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-Requested-With',
+    'Cache-Control': 'no-cache',
+    'X-CORS-Test': 'success'
+  });
+
+  res.json({
+    message: 'CORS test successful',
+    origin: req.get('Origin') || 'No origin header',
+    method: req.method,
+    timestamp: new Date().toISOString(),
+    headers_received: req.headers
+  });
+});
+
+// ===== ENDPOINT DEBUG-PRODUCTS =====
+app.get('/debug-products', async (req, res) => {
+  console.log('🐛 Debug de productos solicitado...');
+
+  try {
+    // Headers para no-cache
+    res.set({
+      'Cache-Control': 'no-cache, no-store, must-revalidate',
+      'X-Debug-Endpoint': 'true'
+    });
+
+    // Contar total de productos
+    const totalCount = await db.query('SELECT COUNT(*) as total FROM products');
+
+    // Contar productos ALUGUERES
+    const alugueresCount = await db.query(
+      `SELECT COUNT(*) as alugueres_total FROM products
+       WHERE categories::jsonb @> '[{"id": ${ALUGUERES_CATEGORY_ID}}]'`
+    );
+
+    // Contar productos ALUGUERES por status
+    const statusBreakdown = await db.query(
+      `SELECT
+         status,
+         stock_status,
+         COUNT(*) as count,
+         AVG(stock_quantity) as avg_stock
+       FROM products
+       WHERE categories::jsonb @> '[{"id": ${ALUGUERES_CATEGORY_ID}}]'
+       GROUP BY status, stock_status
+       ORDER BY count DESC`
+    );
+
+    // Ejemplo de productos ALUGUERES (primeros 5)
+    const sampleProducts = await db.query(
+      `SELECT
+         woocommerce_id, name, status, stock_status, stock_quantity,
+         categories::text as categories_preview
+       FROM products
+       WHERE categories::jsonb @> '[{"id": ${ALUGUERES_CATEGORY_ID}}]'
+       LIMIT 5`
+    );
+
+    const debugInfo = {
+      total_products_in_db: parseInt(totalCount.rows[0].total),
+      alugueres_products_total: parseInt(alugueresCount.rows[0].alugueres_total),
+      status_breakdown: statusBreakdown.rows,
+      sample_products: sampleProducts.rows,
+      category_filter: `ID: ${ALUGUERES_CATEGORY_ID}`,
+      timestamp: new Date().toISOString()
+    };
+
+    console.log('🐛 Debug info:', JSON.stringify(debugInfo, null, 2));
+    res.json(debugInfo);
+  } catch (error) {
+    console.error('❌ Error no debug:', error.message);
+    res.status(500).json({
+      error: 'Error no debug de produtos',
+      details: error.message
+    });
+  }
+});
+
+// ===== ENDPOINT CLEAR-CACHE =====
+app.post('/clear-cache', (req, res) => {
+  console.log('🧹 Cache clearing request received');
+
+  // Headers para forzar no-cache en este endpoint
+  res.set({
+    'Cache-Control': 'no-cache, no-store, must-revalidate',
+    'Pragma': 'no-cache',
+    'Expires': '0',
+    'CF-Cache-Tag': 'cache-control',
+    'X-Cache-Invalidate': 'products,alugueres,bikesul' // Indica qué invalidar
+  });
+
+  res.json({
+    success: true,
+    message: 'Cache clear signal sent to Cloudflare',
+    invalidated_tags: ['products', 'alugueres', 'bikesul'],
+    timestamp: new Date().toISOString()
+  });
+});
+
 app.listen(PORT, () => {
   console.log(`🚀 Server listo en puerto ${PORT}`);
   console.log(`💓 Health check disponible en: http://localhost:${PORT}/health`);
+  console.log(`📊 Status check disponible en: http://localhost:${PORT}/status`);
   console.log(`📦 Productos disponibles en: http://localhost:${PORT}/products`);
   console.log(`🔄 Sincronización disponible en: http://localhost:${PORT}/sync-products`);
+  console.log(`📈 Sync status disponible en: http://localhost:${PORT}/sync-status`);
+  console.log(`🧪 CORS test disponible en: http://localhost:${PORT}/cors-test`);
+  console.log(`🐛 Debug productos disponible en: http://localhost:${PORT}/debug-products`);
+  console.log(`🧹 Clear cache disponible en: http://localhost:${PORT}/clear-cache (POST)`);
 });
