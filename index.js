@@ -1,3 +1,4 @@
+// server.js
 require('dotenv').config();
 const express = require('express');
 const axios = require('axios');
@@ -6,16 +7,14 @@ const { Pool } = require('pg');
 
 const app = express();
 
-// Orígenes permitidos
+// Orígenes permitidos (ajusta si hace falta)
 const allowedOrigins = [
   'https://app.bikesultoursgest.com',
   'https://api.bikesultoursgest.com'
 ];
 
-// Middleware CORS global - MEJORADO para compatibilidad total
 app.use(cors({
   origin: function (origin, callback) {
-    // Permitir llamadas sin origin (como Postman y curl)
     if (!origin) return callback(null, true);
     if (allowedOrigins.includes(origin)) return callback(null, true);
     console.log(`❌ CORS blocked for origin: ${origin}`);
@@ -23,121 +22,100 @@ app.use(cors({
   },
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'HEAD', 'PATCH'],
   allowedHeaders: [
-    'Content-Type',
-    'Authorization',
-    'User-Agent',
-    'Cache-Control',     // ← Para cache warming
-    'Pragma',            // ← Para cache control
-    'Accept',            // ← Para content negotiation
-    'Accept-Encoding',   // ← Para compresión
-    'Accept-Language',   // ← Para i18n
-    'X-Requested-With',  // ← Para XHR requests
-    'Origin',            // ← Header origen
-    'Referer',           // ← Header referencia
-    'If-None-Match',     // ← Para ETag validation
-    'If-Modified-Since'  // ← Para Last-Modified validation
+    'Content-Type','Authorization','User-Agent','Cache-Control','Pragma',
+    'Accept','Accept-Encoding','Accept-Language','X-Requested-With',
+    'Origin','Referer','If-None-Match','If-Modified-Since'
   ],
-  exposedHeaders: [
-    'Cache-Control',
-    'ETag',
-    'Last-Modified',
-    'X-Cache-Status',
-    'CF-Cache-Tag'
-  ],
+  exposedHeaders: ['Cache-Control','ETag','Last-Modified','X-Cache-Status','CF-Cache-Tag'],
   credentials: true,
-  optionsSuccessStatus: 200 // Para navegadores legacy
+  optionsSuccessStatus: 200
 }));
 
-// Middleware para manejar OPTIONS (preflight) en todas las rutas
+// OPTIONS global
 app.options('*', cors());
 
-// Middleware de logging para debugging CORS
+// Logging middleware para debug
 app.use((req, res, next) => {
   const origin = req.get('Origin');
   const method = req.method;
-
   if (method === 'OPTIONS' || origin) {
-    console.log(`🌐 CORS Request: ${method} ${req.path} from ${origin || 'no-origin'}`);
-    console.log(`📝 Headers: ${JSON.stringify(req.headers, null, 2)}`);
+    console.log(`🌐 ${method} ${req.path} from ${origin || 'no-origin'}`);
   }
-
   next();
 });
 
 app.use(express.json());
 
-// PostgreSQL
+// Pool Postgres (Neon)
 const db = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: { rejectUnauthorized: false }
 });
 
-// ID de la categoría ALUGUERES en WooCommerce
-const ALUGUERES_CATEGORY_ID = 319;
+// Config
+const PORT = process.env.PORT || 4000;
+const ALUGUERES_CATEGORY_ID = parseInt(process.env.ALUGUERES_CATEGORY_ID || '319', 10);
 
-// Función auxiliar para extrair pricing ACF desde meta_data
+// --- Utiles ---
+function parseJSONSafe(value, fallback) {
+  if (value === undefined || value === null) return fallback;
+  if (typeof value === 'object') return value;
+  if (typeof value === 'string') {
+    try { return JSON.parse(value); } catch (err) { return fallback; }
+  }
+  return fallback;
+}
+
+// Extrae precios ACF (igual que tu función previa, robusta)
 function extractACFPricing(acfData, metaData = []) {
-  let pricing = {};
-  
-  // Primero intentar desde ACF directo
+  const pricing = {};
   if (acfData && typeof acfData === 'object') {
     if (acfData.precio_1_2) pricing.precio_1_2 = acfData.precio_1_2;
     if (acfData.precio_3_6) pricing.precio_3_6 = acfData.precio_3_6;
     if (acfData.precio_7_mais) pricing.precio_7_mais = acfData.precio_7_mais;
   }
-  
-  // Si no hay pricing en ACF, buscar en meta_data
   if (Object.keys(pricing).length === 0 && Array.isArray(metaData)) {
     metaData.forEach(meta => {
-      if (meta.key === 'precio_1_2' || meta.key === '_precio_1_2') {
-        pricing.precio_1_2 = meta.value;
-      }
-      if (meta.key === 'precio_3_6' || meta.key === '_precio_3_6') {
-        pricing.precio_3_6 = meta.value;
-      }
-      if (meta.key === 'precio_7_mais' || meta.key === '_precio_7_mais') {
-        pricing.precio_7_mais = meta.value;
-      }
+      const key = meta.key || meta.name || '';
+      const val = meta.value !== undefined ? meta.value : meta.val;
+      if (!val) return;
+      if (key === 'precio_1_2' || key === '_precio_1_2') pricing.precio_1_2 = val;
+      if (key === 'precio_3_6' || key === '_precio_3_6') pricing.precio_3_6 = val;
+      if (key === 'precio_7_mais' || key === '_precio_7_mais') pricing.precio_7_mais = val;
     });
   }
-  
   return pricing;
 }
 
-// Función para procesar y transformar productos para compatibilidad total
+// Procesa fila DB -> objeto API
 function processProductForResponse(dbProduct) {
   try {
-    // Parsear campos JSON
-    const categories = JSON.parse(dbProduct.categories || '[]');
-    const images = JSON.parse(dbProduct.images || '[]');
-    const acfData = JSON.parse(dbProduct.acf_data || '{}');
-    const metaData = JSON.parse(dbProduct.meta_data || '[]');
-    const variationsIds = JSON.parse(dbProduct.variations_ids || '[]');
+    const categories = parseJSONSafe(dbProduct.categories, []);
+    const images = parseJSONSafe(dbProduct.images, []);
+    const acfData = parseJSONSafe(dbProduct.acf_data, {});
+    const metaData = parseJSONSafe(dbProduct.meta_data, []);
+    const variationsIds = parseJSONSafe(dbProduct.variations_ids, []);
+    const variationsStock = parseJSONSafe(dbProduct.variations_stock, []);
 
-    // Extraer categoria principal (excluyendo "alugueres")
-    const subcategory = categories.find(cat => cat.slug && cat.slug !== "alugueres");
+    const subcategory = Array.isArray(categories) ? categories.find(cat => cat && cat.slug && cat.slug !== 'alugueres') : undefined;
     const primaryCategory = subcategory ? subcategory.slug : 'general';
 
-    // Obtener imagen principal
-    const mainImage = images.length > 0 && images[0]?.src 
-      ? images[0].src 
-      : '/placeholder.svg';
+    const mainImage = Array.isArray(images) && images.length > 0 ? (images[0].src || images[0].url || '/placeholder.svg') : '/placeholder.svg';
 
-    // Extraer pricing ACF
     const acfPricing = extractACFPricing(acfData, metaData);
-    
-    // Calcular precio basado en ACF o precio regular
-    let calculatedPrice = parseFloat(dbProduct.price || 0);
+
+    let calculatedPrice = 0;
+    if (dbProduct.price !== undefined && dbProduct.price !== null && dbProduct.price !== '') calculatedPrice = parseFloat(dbProduct.price) || 0;
+    else if (dbProduct.regular_price !== undefined && dbProduct.regular_price !== null && dbProduct.regular_price !== '') calculatedPrice = parseFloat(dbProduct.regular_price) || 0;
+
     if (acfPricing.precio_1_2) {
-      calculatedPrice = parseFloat(acfPricing.precio_1_2);
-    } else if (dbProduct.regular_price) {
-      calculatedPrice = parseFloat(dbProduct.regular_price);
+      const p = parseFloat(acfPricing.precio_1_2);
+      if (!isNaN(p)) calculatedPrice = p;
     }
 
-    // Producto procesado compatible con frontend
     return {
-      id: dbProduct.woocommerce_id ? dbProduct.woocommerce_id.toString() : dbProduct.id.toString(),
-      name: dbProduct.name,
+      id: dbProduct.woocommerce_id ? dbProduct.woocommerce_id.toString() : (dbProduct.id ? dbProduct.id.toString() : '0'),
+      name: dbProduct.name || '',
       type: primaryCategory,
       price: calculatedPrice,
       regular_price: parseFloat(dbProduct.regular_price || 0),
@@ -155,13 +133,12 @@ function processProductForResponse(dbProduct) {
       acf_pricing: acfPricing,
       meta_data: metaData,
       variations_ids: variationsIds,
-      // Campos adicionales para compatibilidad
+      variations_stock: variationsStock,
       sku: dbProduct.sku || '',
       category: primaryCategory
     };
-  } catch (error) {
-    console.error('Error procesando producto:', error);
-    // Fallback básico si hay error en el procesamiento
+  } catch (err) {
+    console.error('Error procesando producto:', err);
     return {
       id: dbProduct.id?.toString() || 'unknown',
       name: dbProduct.name || 'Produto sem nome',
@@ -176,411 +153,348 @@ function processProductForResponse(dbProduct) {
   }
 }
 
-// 🔹 Endpoint de saúde con cache headers
-app.get('/health', (req, res) => {
-  // Headers CORS explícitos para health check
-  res.header('Access-Control-Allow-Origin', req.get('Origin') || '*');
-  res.header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS, HEAD');
-  res.header('Access-Control-Allow-Headers', 'Content-Type, Cache-Control, Pragma, Accept, Accept-Encoding, User-Agent, X-Requested-With');
-  res.header('Access-Control-Allow-Credentials', 'true');
+// --- Helper: fetch variations from WooCommerce (paginado) ---
+async function fetchVariationsFromWoo(productId) {
+  const base = process.env.WOOCOMMERCE_API_BASE;
+  const auth = {
+    username: process.env.WOOCOMMERCE_CONSUMER_KEY,
+    password: process.env.WOOCOMMERCE_CONSUMER_SECRET
+  };
+  const per_page = 100;
+  let page = 1;
+  let all = [];
 
-  // Headers para health check (cache corto)
-  res.set({
-    'Cache-Control': 'public, max-age=60, s-maxage=120', // 1min browser, 2min CDN
-    'CF-Cache-Tag': 'health,system',
-    'X-Cache-Status': 'CACHE-ENABLED',
-    'X-CORS-Debug': 'explicit-headers-set'
-  });
-
-  console.log(`✅ Health check successful from ${req.get('Origin') || 'no-origin'}`);
-
-  res.json({
-    status: 'ok',
-    timestamp: new Date().toISOString(),
-    service: 'BikesSul Backend - Alugueres Filter',
-    version: '2.0.1',
-    cors_debug: {
-      origin: req.get('Origin'),
-      user_agent: req.get('User-Agent'),
-      headers_received: Object.keys(req.headers).length
-    }
-  });
-});
-
-// 🔹 Sincronizar produtos desde WooCommerce (SOLO ALUGUERES)
-app.get('/sync-products', async (req, res) => {
   try {
-    console.log('🔄 Iniciando sincronização de produtos ALUGUERES...');
-    
-    // Sincronizar SOLO productos de la categoría ALUGUERES
-    const response = await axios.get(`${process.env.WOOCOMMERCE_API_BASE}/products`, {
-      params: {
-        category: ALUGUERES_CATEGORY_ID,
-        status: 'publish',
-        per_page: 100
-      },
-      auth: {
-        username: process.env.WOOCOMMERCE_CONSUMER_KEY,
-        password: process.env.WOOCOMMERCE_CONSUMER_SECRET,
-      }
-    });
+    while (true) {
+      const resp = await axios.get(`${base}/products/${productId}/variations`, {
+        params: { per_page, page },
+        auth,
+        timeout: 30_000
+      });
+      if (!Array.isArray(resp.data) || resp.data.length === 0) break;
+      all = all.concat(resp.data);
+      if (resp.data.length < per_page) break;
+      page++;
+    }
+  } catch (err) {
+    console.error(`❌ Error fetching variations for product ${productId}:`, err.response?.data || err.message || err);
+    // Devolver lo que tengamos (posible vacío)
+  }
+  return all;
+}
 
-    const products = response.data;
-    let syncedCount = 0;
-    let errorCount = 0;
+// --- Endpoint: sync-products (trae variaciones y actualiza variations_stock) ---
+app.get('/sync-products', async (req, res) => {
+  console.log('🔄 Iniciando sincronización de productos (incluye variaciones)...');
 
-    console.log(`📦 ${products.length} produtos ALUGUERES obtidos do WooCommerce`);
+  const base = process.env.WOOCOMMERCE_API_BASE;
+  const auth = {
+    username: process.env.WOOCOMMERCE_CONSUMER_KEY,
+    password: process.env.WOOCOMMERCE_CONSUMER_SECRET
+  };
+  const per_page = 100;
+  let page = 1;
+  let totalSynced = 0;
+  let totalErrors = 0;
+  let totalFetched = 0;
 
-    for (let product of products) {
-      try {
-        // Solo sincronizar si el producto pertenece a ALUGUERES
-        const belongsToAlugueres = product.categories?.some(cat => cat.id === ALUGUERES_CATEGORY_ID);
-        
-        if (!belongsToAlugueres) {
-          console.log(`⏭️ Produto ${product.id} não pertence a ALUGUERES, saltando...`);
-          continue;
-        }
-
-        await db.query(
-          `INSERT INTO products (
-            woocommerce_id, name, type, status, price, regular_price,
-            stock_quantity, stock_status, categories, images,
-            short_description, description, variations_ids, acf_data,
-            meta_data, created_at, updated_at
-          ) VALUES (
-            $1, $2, $3, $4, $5, $6,
-            $7, $8, $9, $10,
-            $11, $12, $13, $14,
-            $15, NOW(), NOW()
-          )
-          ON CONFLICT (woocommerce_id) DO UPDATE SET
-            name = EXCLUDED.name,
-            type = EXCLUDED.type,
-            status = EXCLUDED.status,
-            price = EXCLUDED.price,
-            regular_price = EXCLUDED.regular_price,
-            stock_quantity = EXCLUDED.stock_quantity,
-            stock_status = EXCLUDED.stock_status,
-            categories = EXCLUDED.categories,
-            images = EXCLUDED.images,
-            short_description = EXCLUDED.short_description,
-            description = EXCLUDED.description,
-            variations_ids = EXCLUDED.variations_ids,
-            acf_data = EXCLUDED.acf_data,
-            meta_data = EXCLUDED.meta_data,
-            updated_at = NOW()
-        `, [
-          product.id,
-          product.name,
-          product.type || 'simple',
-          product.status || 'publish',
-          product.price || 0,
-          product.regular_price || 0,
-          product.stock_quantity || 0,
-          product.stock_status || 'instock',
-          JSON.stringify(product.categories || []),
-          JSON.stringify(product.images || []),
-          product.short_description || '',
-          product.description || '',
-          JSON.stringify(product.variations || []),
-          JSON.stringify(product.acf || {}),
-          JSON.stringify(product.meta_data || [])
-        ]);
-        
-        syncedCount++;
-        console.log(`✅ Produto ${product.id} - ${product.name} sincronizado`);
-      } catch (productError) {
-        console.error(`❌ Erro sincronizando produto ${product.id}:`, productError.message);
-        errorCount++;
-      }
+  try {
+    // intentar crear índice GIN para mejorar búsquedas JSONB (silencioso si no se puede)
+    try {
+      await db.query(`CREATE INDEX IF NOT EXISTS idx_products_categories_gin ON products USING gin (categories jsonb_path_ops)`);
+      console.log('✅ Índice GIN en categories asegurado.');
+    } catch (indexErr) {
+      console.warn('⚠️ No se pudo crear índice GIN (posible privilegios).', indexErr.message || indexErr);
     }
 
-    const result = {
+    while (true) {
+      const resp = await axios.get(`${base}/products`, {
+        params: { category: ALUGUERES_CATEGORY_ID, status: 'publish', per_page, page },
+        auth,
+        timeout: 30_000
+      });
+
+      const products = Array.isArray(resp.data) ? resp.data : [];
+      if (products.length === 0) break;
+      totalFetched += products.length;
+
+      for (const product of products) {
+        try {
+          // Double-check: si no pertenece a ALUGUERES, saltar (precaución)
+          const belongs = Array.isArray(product.categories) && product.categories.some(c => Number(c.id) === ALUGUERES_CATEGORY_ID);
+          if (!belongs) {
+            console.log(`⏭️ Producto ${product.id} no pertenece a ALUGUERES, saltando.`);
+            continue;
+          }
+
+          // Si es variable, traer variaciones y montar variations_stock
+          let variationsStock = [];
+          let variationsIds = [];
+
+          if (product.type === 'variable' || (Array.isArray(product.variations) && product.variations.length > 0)) {
+            const variations = await fetchVariationsFromWoo(product.id);
+            variationsIds = variations.map(v => v.id);
+            variationsStock = variations.map(v => ({
+              id: v.id,
+              sku: v.sku || null,
+              stock_quantity: v.stock_quantity !== undefined && v.stock_quantity !== null ? Number(v.stock_quantity) : null,
+              stock_status: v.stock_status || null,
+              price: v.price !== undefined ? v.price : null,
+              regular_price: v.regular_price !== undefined ? v.regular_price : null,
+              attributes: v.attributes || []
+            }));
+          } else {
+            // no es variable -> leave empty or use parent's data
+            variationsIds = product.variations || [];
+            variationsStock = [];
+          }
+
+          // Calcular stock agregado: suma de stock_quantity de variaciones cuando exista
+          let aggregatedStock = 0;
+          if (variationsStock.length > 0) {
+            aggregatedStock = variationsStock.reduce((acc, vs) => {
+              const q = Number.isFinite(Number(vs.stock_quantity)) ? Number(vs.stock_quantity) : 0;
+              return acc + q;
+            }, 0);
+          } else {
+            aggregatedStock = product.stock_quantity !== undefined && product.stock_quantity !== null ? Number(product.stock_quantity) : 0;
+          }
+
+          // Insert / Update en DB (parametrizado)
+          const q = `
+            INSERT INTO products (
+              woocommerce_id, name, type, status, price, regular_price,
+              stock_quantity, stock_status, categories, images,
+              short_description, description, variations_ids, acf_data,
+              meta_data, variations_stock, created_at, updated_at
+            ) VALUES (
+              $1, $2, $3, $4, $5, $6,
+              $7, $8, $9, $10,
+              $11, $12, $13, $14,
+              $15, $16, NOW(), NOW()
+            )
+            ON CONFLICT (woocommerce_id) DO UPDATE SET
+              name = EXCLUDED.name,
+              type = EXCLUDED.type,
+              status = EXCLUDED.status,
+              price = EXCLUDED.price,
+              regular_price = EXCLUDED.regular_price,
+              stock_quantity = EXCLUDED.stock_quantity,
+              stock_status = EXCLUDED.stock_status,
+              categories = EXCLUDED.categories,
+              images = EXCLUDED.images,
+              short_description = EXCLUDED.short_description,
+              description = EXCLUDED.description,
+              variations_ids = EXCLUDED.variations_ids,
+              acf_data = EXCLUDED.acf_data,
+              meta_data = EXCLUDED.meta_data,
+              variations_stock = EXCLUDED.variations_stock,
+              updated_at = NOW()
+          `;
+
+          const params = [
+            product.id,
+            product.name || '',
+            product.type || 'simple',
+            product.status || 'publish',
+            product.price || 0,
+            product.regular_price || 0,
+            aggregatedStock,
+            product.stock_status || 'instock',
+            JSON.stringify(product.categories || []),
+            JSON.stringify(product.images || []),
+            product.short_description || '',
+            product.description || '',
+            JSON.stringify(variationsIds || []),
+            JSON.stringify(product.acf || {}),
+            JSON.stringify(product.meta_data || []),
+            JSON.stringify(variationsStock || [])
+          ];
+
+          await db.query(q, params);
+          totalSynced++;
+          console.log(`✅ Sincronizado producto ${product.id} (${product.name}) - variaciones: ${variationsIds.length}`);
+        } catch (prodErr) {
+          totalErrors++;
+          console.error(`❌ Error procesando producto ${product.id}:`, prodErr.response?.data || prodErr.message || prodErr);
+        }
+      } // for products
+
+      if (products.length < per_page) break;
+      page++;
+    } // while pages
+
+    const resultSummary = {
       success: true,
-      message: `Sincronização concluída: ${syncedCount} produtos ALUGUERES sincronizados`,
-      synced_count: syncedCount,
-      total_products: products.length,
-      error_count: errorCount,
+      total_fetched: totalFetched,
+      total_synced: totalSynced,
+      total_errors: totalErrors,
       timestamp: new Date().toISOString(),
-      category_filter: 'ALUGUERES (ID: 319)',
-      cache_invalidated: true // Indica que el cache debe invalidarse
+      category: `ALUGUERES (ID ${ALUGUERES_CATEGORY_ID})`
     };
 
-    // Headers para invalidar cache después de sync
+    // Respuesta
     res.set({
       'Cache-Control': 'no-cache, no-store, must-revalidate',
       'X-Cache-Invalidate': 'products,alugueres,bikesul',
-      'X-Sync-Complete': 'true',
-      'CF-Cache-Tag': 'sync,system'
+      'X-Sync-Complete': 'true'
     });
+    console.log('✅ Sincronización completada', resultSummary);
+    return res.json(resultSummary);
 
-    console.log('✅ Sincronização completada:', result);
-    res.json(result);
   } catch (err) {
-    console.error('❌ Error completo na sincronização:', err.response?.data || err.message);
-    res.status(500).json({ 
+    console.error('❌ Sincronización falló:', err.response?.data || err.message || err);
+    return res.status(500).json({
       success: false,
-      error: err.response?.data || err.message,
-      message: 'Erro na sincronização de produtos ALUGUERES'
+      error: err.response?.data || err.message || String(err)
     });
   }
 });
 
-// 🔹 Obtener produtos (SOLO ALUGUERES filtrados) con cache headers para Cloudflare
+// --- ENDPOINT /products (lectura) ---
 app.get('/products', async (req, res) => {
   try {
     const { category } = req.query;
 
-    // Headers CORS explícitos para productos
     res.header('Access-Control-Allow-Origin', req.get('Origin') || '*');
     res.header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS, HEAD');
     res.header('Access-Control-Allow-Headers', 'Content-Type, Cache-Control, Pragma, Accept, Accept-Encoding, User-Agent, X-Requested-With');
     res.header('Access-Control-Allow-Credentials', 'true');
 
-    // Headers de cache para Cloudflare (Cache global instantáneo)
     res.set({
-      'Cache-Control': 'public, max-age=300, s-maxage=900', // 5min browser, 15min CDN
-      'CF-Cache-Tag': 'products,alugueres,bikesul', // Tags para invalidación selectiva
-      'Vary': 'Accept-Encoding', // Compresión diferenciada
-      'ETag': `"products-${Date.now()}"`, // ETag para validación
-      'Last-Modified': new Date().toUTCString(), // Última modificación
-      'X-Cache-Status': 'CACHE-ENABLED', // Header de debug
-      'X-Content-Type-Options': 'nosniff', // Seguridad
-      'X-Frame-Options': 'DENY', // Seguridad
-      'X-CORS-Debug': 'explicit-headers-set'
+      'Cache-Control': 'public, max-age=300, s-maxage=900',
+      'CF-Cache-Tag': 'products,alugueres,bikesul',
+      'Vary': 'Accept-Encoding',
+      'ETag': `"products-${Date.now()}"`,
+      'Last-Modified': new Date().toUTCString()
     });
-    
-    // Consulta más flexible similar a WooCommerce - eliminar filtros restrictivos
-    let query = `
+
+    let sql = `
       SELECT * FROM products
-      WHERE categories::text LIKE '%"id":${ALUGUERES_CATEGORY_ID}%'
-      AND status = 'publish'
+      WHERE EXISTS (
+        SELECT 1 FROM jsonb_array_elements(categories) AS cat
+        WHERE (cat->>'id')::int = $1
+      )
+      AND LOWER(status) = 'publish'
     `;
+    const params = [ALUGUERES_CATEGORY_ID];
 
-    // Opcional: Solo filtrar productos que NO estén explícitamente fuera de stock
-    // (permitir stock 0, null, y diferentes stock_status como WooCommerce)
-    // query += ` AND (stock_status IS NULL OR stock_status != 'outofstock')`;
-    
-    // Filtro adicional por categoria específica si se proporciona
     if (category && category !== 'all') {
-      query += ` AND categories::text LIKE '%"slug":"${category}"%'`;
+      params.push(String(category).toLowerCase());
+      sql += `
+        AND EXISTS (
+          SELECT 1 FROM jsonb_array_elements(categories) AS cat2
+          WHERE LOWER(cat2->>'slug') = $${params.length}
+        )
+      `;
     }
-    
-    query += ` ORDER BY created_at DESC`;
-    
-    console.log(`🔍 Consultando produtos ALUGUERES${category ? ` categoria: ${category}` : ''}...`);
-    console.log(`🔍 Query SQL: ${query}`);
+    sql += ` ORDER BY created_at DESC`;
 
-    const result = await db.query(query);
-
-    console.log(`🗃️ Produtos brutos encontrados na BD: ${result.rows.length}`);
-
-    // Procesar cada producto para compatibilidad total
-    const processedProducts = result.rows.map(processProductForResponse);
-
-    console.log(`📦 ${processedProducts.length} produtos ALUGUERES processados e retornados`);
-    
-    res.json(processedProducts);
-  } catch (error) {
-    console.error('❌ Error obteniendo produtos:', error.message);
-    res.status(500).json({ 
-      error: 'Error al obtener produtos ALUGUERES',
-      details: error.message 
-    });
+    const result = await db.query(sql, params);
+    const processed = result.rows.map(processProductForResponse);
+    return res.json(processed);
+  } catch (err) {
+    console.error('❌ Error obteniendo productos:', err.message || err);
+    return res.status(500).json({ error: 'Error al obtener productos', details: err.message || String(err) });
   }
 });
 
-// 🔹 Obtener produto específico por ID con cache headers
+// --- ENDPOINT /products/:id (lectura) ---
 app.get('/products/:id', async (req, res) => {
   try {
-    const { id } = req.params;
-    console.log(`🔍 Buscando produto ${id}...`);
-
-    // Headers de cache para producto específico (cache más largo)
+    const id = req.params.id;
     res.set({
-      'Cache-Control': 'public, max-age=600, s-maxage=1800', // 10min browser, 30min CDN
+      'Cache-Control': 'public, max-age=600, s-maxage=1800',
       'CF-Cache-Tag': `product-${id},products,alugueres,bikesul`,
-      'Vary': 'Accept-Encoding',
-      'ETag': `"product-${id}-${Date.now()}"`,
-      'Last-Modified': new Date().toUTCString(),
-      'X-Cache-Status': 'CACHE-ENABLED'
     });
-    
-    const result = await db.query(
-      `SELECT * FROM products 
-       WHERE (woocommerce_id = $1 OR id = $1) 
-       AND categories::text LIKE '%"id":${ALUGUERES_CATEGORY_ID}%' 
-       AND status = 'publish'`,
-      [id]
-    );
-    
+
+    const sql = `
+      SELECT * FROM products
+      WHERE (woocommerce_id = $1 OR id = $1)
+      AND EXISTS (
+        SELECT 1 FROM jsonb_array_elements(categories) AS cat
+        WHERE (cat->>'id')::int = $2
+      )
+      AND LOWER(status) = 'publish'
+    `;
+    const result = await db.query(sql, [id, ALUGUERES_CATEGORY_ID]);
     if (result.rows.length === 0) {
-      console.log(`⚠️ Produto ${id} não encontrado em ALUGUERES`);
-      return res.status(404).json({ 
-        error: 'Produto não encontrado na categoria ALUGUERES',
-        id: id 
-      });
+      return res.status(404).json({ error: 'Producto no encontrado en ALUGUERES', id });
     }
-    
-    const processedProduct = processProductForResponse(result.rows[0]);
-    
-    console.log(`✅ Produto ${id} encontrado: ${processedProduct.name}`);
-    res.json(processedProduct);
-  } catch (error) {
-    console.error(`❌ Error buscando produto ${req.params.id}:`, error.message);
-    res.status(500).json({ 
-      error: 'Error al buscar produto',
-      details: error.message 
-    });
+    const processed = processProductForResponse(result.rows[0]);
+    return res.json(processed);
+  } catch (err) {
+    console.error(`❌ Error buscando producto ${req.params.id}:`, err.message || err);
+    return res.status(500).json({ error: 'Error al buscar producto', details: err.message || String(err) });
   }
 });
 
-// 🔹 Endpoint para verificar status da sincronização
-app.get('/sync-status', async (req, res) => {
-  try {
-    const result = await db.query(`
-      SELECT 
-        COUNT(*) as total_products,
-        COUNT(CASE WHEN status = 'publish' THEN 1 END) as published_products,
-        COUNT(CASE WHEN stock_quantity > 0 THEN 1 END) as in_stock_products,
-        MAX(updated_at) as last_sync
-      FROM products 
-      WHERE categories::text LIKE '%"id":${ALUGUERES_CATEGORY_ID}%'
-    `);
-    
-    res.json({
-      category: 'ALUGUERES',
-      category_id: ALUGUERES_CATEGORY_ID,
-      ...result.rows[0],
-      database_status: 'connected'
-    });
-  } catch (error) {
-    console.error('❌ Error verificando status:', error.message);
-    res.status(500).json({ 
-      error: 'Error verificando status da sincronização',
-      details: error.message 
-    });
-  }
-});
-
-// 🔹 Endpoint de test CORS para debugging
-app.get('/cors-test', (req, res) => {
-  console.log('🧪 CORS Test request received');
-
-  // Headers CORS explícitos máximos
-  res.header('Access-Control-Allow-Origin', req.get('Origin') || '*');
-  res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS, HEAD, PATCH');
-  res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, Cache-Control, Pragma, Accept, Accept-Encoding, User-Agent, X-Requested-With, Origin, Referer, If-None-Match, If-Modified-Since');
-  res.header('Access-Control-Expose-Headers', 'Cache-Control, ETag, Last-Modified, X-Cache-Status, CF-Cache-Tag');
-  res.header('Access-Control-Allow-Credentials', 'true');
-
-  res.set({
-    'Cache-Control': 'no-cache, no-store, must-revalidate',
-    'X-CORS-Test': 'success',
-    'X-CORS-Debug': 'test-endpoint'
-  });
-
-  res.json({
-    success: true,
-    message: 'CORS Test successful',
-    request_info: {
-      origin: req.get('Origin'),
-      user_agent: req.get('User-Agent'),
-      method: req.method,
-      headers: req.headers,
-      query: req.query
-    },
-    timestamp: new Date().toISOString()
-  });
-});
-
-// 🔹 Endpoint de debugging para diagnosticar productos en la base de datos
+// --- DEBUG /debug-products ---
 app.get('/debug-products', async (req, res) => {
   try {
-    console.log('🐛 Debug request para verificar produtos na BD...');
+    const qTotal = await db.query('SELECT COUNT(*) as total FROM products');
+    const total = parseInt(qTotal.rows[0].total, 10);
 
-    // Contar total de productos
-    const totalCount = await db.query('SELECT COUNT(*) as total FROM products');
+    const qAlug = await db.query(
+      `SELECT COUNT(*) as alug_total FROM products
+       WHERE EXISTS (
+         SELECT 1 FROM jsonb_array_elements(categories) AS cat
+         WHERE (cat->>'id')::int = $1
+       )`, [ALUGUERES_CATEGORY_ID]);
 
-    // Contar productos ALUGUERES
-    const alugueresCount = await db.query(
-      `SELECT COUNT(*) as alugueres_total FROM products
-       WHERE categories::text LIKE '%"id":${ALUGUERES_CATEGORY_ID}%'`
-    );
-
-    // Contar productos ALUGUERES por status
-    const statusBreakdown = await db.query(
-      `SELECT
-         status,
-         stock_status,
-         COUNT(*) as count,
-         AVG(stock_quantity) as avg_stock
+    const qSamples = await db.query(
+      `SELECT woocommerce_id, name, status, stock_quantity, variations_ids, variations_stock, categories
        FROM products
-       WHERE categories::text LIKE '%"id":${ALUGUERES_CATEGORY_ID}%'
-       GROUP BY status, stock_status
-       ORDER BY count DESC`
-    );
+       WHERE EXISTS (
+         SELECT 1 FROM jsonb_array_elements(categories) AS cat
+         WHERE (cat->>'id')::int = $1
+       )
+       ORDER BY created_at DESC
+       LIMIT 10`, [ALUGUERES_CATEGORY_ID]);
 
-    // Ejemplo de productos ALUGUERES (primeros 5)
-    const sampleProducts = await db.query(
-      `SELECT
-         woocommerce_id, name, status, stock_status, stock_quantity,
-         categories::text as categories_preview
-       FROM products
-       WHERE categories::text LIKE '%"id":${ALUGUERES_CATEGORY_ID}%'
-       LIMIT 5`
-    );
-
-    const debugInfo = {
-      total_products_in_db: totalCount.rows[0].total,
-      alugueres_products_total: alugueresCount.rows[0].alugueres_total,
-      status_breakdown: statusBreakdown.rows,
-      sample_products: sampleProducts.rows,
-      category_filter: `ID: ${ALUGUERES_CATEGORY_ID}`,
+    const debug = {
+      total_products_in_db: total,
+      alugueres_products_total: parseInt(qAlug.rows[0].alug_total, 10),
+      sample_products: qSamples.rows,
       timestamp: new Date().toISOString()
     };
-
-    console.log('🐛 Debug info:', JSON.stringify(debugInfo, null, 2));
-
-    res.set({
-      'Cache-Control': 'no-cache, no-store, must-revalidate',
-      'X-Debug-Endpoint': 'true'
-    });
-
-    res.json(debugInfo);
-  } catch (error) {
-    console.error('❌ Error no debug:', error.message);
-    res.status(500).json({
-      error: 'Error no debug de produtos',
-      details: error.message
-    });
+    return res.json(debug);
+  } catch (err) {
+    console.error('❌ Error en debug-products:', err.message || err);
+    return res.status(500).json({ error: 'Error en debug-products', details: err.message || String(err) });
   }
 });
 
-// 🔹 Endpoint para limpeza de cache Cloudflare (útil após sincronização)
-app.post('/clear-cache', (req, res) => {
-  console.log('🧹 Cache clearing request received');
+// --- SYNC STATUS ---
+app.get('/sync-status', async (req, res) => {
+  try {
+    const q = await db.query(`
+      SELECT COUNT(*) as total,
+             COUNT(*) FILTER (WHERE LOWER(status) = 'publish') AS published,
+             COUNT(*) FILTER (WHERE stock_quantity > 0) AS in_stock,
+             MAX(updated_at) as last_sync
+      FROM products
+      WHERE EXISTS (
+        SELECT 1 FROM jsonb_array_elements(categories) AS cat
+        WHERE (cat->>'id')::int = $1
+      )`, [ALUGUERES_CATEGORY_ID]);
 
-  // Headers para forzar no-cache en este endpoint
-  res.set({
-    'Cache-Control': 'no-cache, no-store, must-revalidate',
-    'Pragma': 'no-cache',
-    'Expires': '0',
-    'CF-Cache-Tag': 'cache-control',
-    'X-Cache-Invalidate': 'products,alugueres,bikesul' // Indica qué invalidar
-  });
-
-  res.json({
-    success: true,
-    message: 'Cache clear signal sent to Cloudflare',
-    invalidated_tags: ['products', 'alugueres', 'bikesul'],
-    timestamp: new Date().toISOString()
-  });
+    return res.json({
+      category: 'ALUGUERES',
+      category_id: ALUGUERES_CATEGORY_ID,
+      total_products: parseInt(q.rows[0].total, 10),
+      published_products: parseInt(q.rows[0].published, 10),
+      in_stock_products: parseInt(q.rows[0].in_stock, 10),
+      last_sync: q.rows[0].last_sync
+    });
+  } catch (err) {
+    console.error('❌ Error en sync-status:', err.message || err);
+    return res.status(500).json({ error: 'Error en sync-status', details: err.message || String(err) });
+  }
 });
 
-// 🔹 Start
-const PORT = process.env.PORT || 4000;
+// --- Start ---
 app.listen(PORT, () => {
-  console.log(`🚀 BikesSul Backend (ALUGUERES Filter) rodando na porta ${PORT}`);
-  console.log(`📂 Filtrando apenas categoria ALUGUERES (ID: ${ALUGUERES_CATEGORY_ID})`);
+  console.log(`🚀 BikesSul Backend (ALUGUERES Filter) escuchando en puerto ${PORT}`);
+  console.log(`📂 Filtrando categoría ALUGUERES (ID: ${ALUGUERES_CATEGORY_ID})`);
 });
