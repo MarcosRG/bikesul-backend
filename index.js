@@ -350,13 +350,16 @@ app.get('/products', async (req, res) => {
       'X-CORS-Debug': 'explicit-headers-set'
     });
     
+    // Consulta más flexible similar a WooCommerce - eliminar filtros restrictivos
     let query = `
-      SELECT * FROM products 
-      WHERE categories::text LIKE '%"id":${ALUGUERES_CATEGORY_ID}%' 
+      SELECT * FROM products
+      WHERE categories::text LIKE '%"id":${ALUGUERES_CATEGORY_ID}%'
       AND status = 'publish'
-      AND stock_status = 'instock'
-      AND stock_quantity > 0
     `;
+
+    // Opcional: Solo filtrar productos que NO estén explícitamente fuera de stock
+    // (permitir stock 0, null, y diferentes stock_status como WooCommerce)
+    // query += ` AND (stock_status IS NULL OR stock_status != 'outofstock')`;
     
     // Filtro adicional por categoria específica si se proporciona
     if (category && category !== 'all') {
@@ -366,13 +369,16 @@ app.get('/products', async (req, res) => {
     query += ` ORDER BY created_at DESC`;
     
     console.log(`🔍 Consultando produtos ALUGUERES${category ? ` categoria: ${category}` : ''}...`);
-    
+    console.log(`🔍 Query SQL: ${query}`);
+
     const result = await db.query(query);
-    
+
+    console.log(`🗃️ Produtos brutos encontrados na BD: ${result.rows.length}`);
+
     // Procesar cada producto para compatibilidad total
     const processedProducts = result.rows.map(processProductForResponse);
-    
-    console.log(`📦 ${processedProducts.length} produtos ALUGUERES retornados`);
+
+    console.log(`📦 ${processedProducts.length} produtos ALUGUERES processados e retornados`);
     
     res.json(processedProducts);
   } catch (error) {
@@ -486,6 +492,69 @@ app.get('/cors-test', (req, res) => {
     },
     timestamp: new Date().toISOString()
   });
+});
+
+// 🔹 Endpoint de debugging para diagnosticar productos en la base de datos
+app.get('/debug-products', async (req, res) => {
+  try {
+    console.log('🐛 Debug request para verificar produtos na BD...');
+
+    // Contar total de productos
+    const totalCount = await db.query('SELECT COUNT(*) as total FROM products');
+
+    // Contar productos ALUGUERES
+    const alugueresCount = await db.query(
+      `SELECT COUNT(*) as alugueres_total FROM products
+       WHERE categories::text LIKE '%"id":${ALUGUERES_CATEGORY_ID}%'`
+    );
+
+    // Contar productos ALUGUERES por status
+    const statusBreakdown = await db.query(
+      `SELECT
+         status,
+         stock_status,
+         COUNT(*) as count,
+         AVG(stock_quantity) as avg_stock
+       FROM products
+       WHERE categories::text LIKE '%"id":${ALUGUERES_CATEGORY_ID}%'
+       GROUP BY status, stock_status
+       ORDER BY count DESC`
+    );
+
+    // Ejemplo de productos ALUGUERES (primeros 5)
+    const sampleProducts = await db.query(
+      `SELECT
+         woocommerce_id, name, status, stock_status, stock_quantity,
+         categories::text as categories_preview
+       FROM products
+       WHERE categories::text LIKE '%"id":${ALUGUERES_CATEGORY_ID}%'
+       LIMIT 5`
+    );
+
+    const debugInfo = {
+      total_products_in_db: totalCount.rows[0].total,
+      alugueres_products_total: alugueresCount.rows[0].alugueres_total,
+      status_breakdown: statusBreakdown.rows,
+      sample_products: sampleProducts.rows,
+      category_filter: `ID: ${ALUGUERES_CATEGORY_ID}`,
+      timestamp: new Date().toISOString()
+    };
+
+    console.log('🐛 Debug info:', JSON.stringify(debugInfo, null, 2));
+
+    res.set({
+      'Cache-Control': 'no-cache, no-store, must-revalidate',
+      'X-Debug-Endpoint': 'true'
+    });
+
+    res.json(debugInfo);
+  } catch (error) {
+    console.error('❌ Error no debug:', error.message);
+    res.status(500).json({
+      error: 'Error no debug de produtos',
+      details: error.message
+    });
+  }
 });
 
 // 🔹 Endpoint para limpeza de cache Cloudflare (útil após sincronização)
