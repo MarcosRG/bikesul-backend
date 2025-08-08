@@ -12,21 +12,57 @@ const allowedOrigins = [
   'https://api.bikesultoursgest.com'
 ];
 
-// Middleware CORS global
+// Middleware CORS global - MEJORADO para compatibilidad total
 app.use(cors({
   origin: function (origin, callback) {
-    // Permitir llamadas sin origin (como Postman)
+    // Permitir llamadas sin origin (como Postman y curl)
     if (!origin) return callback(null, true);
     if (allowedOrigins.includes(origin)) return callback(null, true);
+    console.log(`❌ CORS blocked for origin: ${origin}`);
     return callback(new Error('Not allowed by CORS: ' + origin));
   },
-  methods: ['GET', 'POST', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'User-Agent'],
-  credentials: true
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'HEAD', 'PATCH'],
+  allowedHeaders: [
+    'Content-Type',
+    'Authorization',
+    'User-Agent',
+    'Cache-Control',     // ← Para cache warming
+    'Pragma',            // ← Para cache control
+    'Accept',            // ← Para content negotiation
+    'Accept-Encoding',   // ← Para compresión
+    'Accept-Language',   // ← Para i18n
+    'X-Requested-With',  // ← Para XHR requests
+    'Origin',            // ← Header origen
+    'Referer',           // ← Header referencia
+    'If-None-Match',     // ← Para ETag validation
+    'If-Modified-Since'  // ← Para Last-Modified validation
+  ],
+  exposedHeaders: [
+    'Cache-Control',
+    'ETag',
+    'Last-Modified',
+    'X-Cache-Status',
+    'CF-Cache-Tag'
+  ],
+  credentials: true,
+  optionsSuccessStatus: 200 // Para navegadores legacy
 }));
 
 // Middleware para manejar OPTIONS (preflight) en todas las rutas
 app.options('*', cors());
+
+// Middleware de logging para debugging CORS
+app.use((req, res, next) => {
+  const origin = req.get('Origin');
+  const method = req.method;
+
+  if (method === 'OPTIONS' || origin) {
+    console.log(`🌐 CORS Request: ${method} ${req.path} from ${origin || 'no-origin'}`);
+    console.log(`📝 Headers: ${JSON.stringify(req.headers, null, 2)}`);
+  }
+
+  next();
+});
 
 app.use(express.json());
 
@@ -142,18 +178,32 @@ function processProductForResponse(dbProduct) {
 
 // 🔹 Endpoint de saúde con cache headers
 app.get('/health', (req, res) => {
+  // Headers CORS explícitos para health check
+  res.header('Access-Control-Allow-Origin', req.get('Origin') || '*');
+  res.header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS, HEAD');
+  res.header('Access-Control-Allow-Headers', 'Content-Type, Cache-Control, Pragma, Accept, Accept-Encoding, User-Agent, X-Requested-With');
+  res.header('Access-Control-Allow-Credentials', 'true');
+
   // Headers para health check (cache corto)
   res.set({
     'Cache-Control': 'public, max-age=60, s-maxage=120', // 1min browser, 2min CDN
     'CF-Cache-Tag': 'health,system',
-    'X-Cache-Status': 'CACHE-ENABLED'
+    'X-Cache-Status': 'CACHE-ENABLED',
+    'X-CORS-Debug': 'explicit-headers-set'
   });
+
+  console.log(`✅ Health check successful from ${req.get('Origin') || 'no-origin'}`);
 
   res.json({
     status: 'ok',
     timestamp: new Date().toISOString(),
     service: 'BikesSul Backend - Alugueres Filter',
-    version: '2.0.0'
+    version: '2.0.1',
+    cors_debug: {
+      origin: req.get('Origin'),
+      user_agent: req.get('User-Agent'),
+      headers_received: Object.keys(req.headers).length
+    }
   });
 });
 
@@ -187,7 +237,7 @@ app.get('/sync-products', async (req, res) => {
         const belongsToAlugueres = product.categories?.some(cat => cat.id === ALUGUERES_CATEGORY_ID);
         
         if (!belongsToAlugueres) {
-          console.log(`⏭️ Producto ${product.id} no pertenece a ALUGUERES, saltando...`);
+          console.log(`⏭️ Produto ${product.id} não pertence a ALUGUERES, saltando...`);
           continue;
         }
 
@@ -281,6 +331,12 @@ app.get('/products', async (req, res) => {
   try {
     const { category } = req.query;
 
+    // Headers CORS explícitos para productos
+    res.header('Access-Control-Allow-Origin', req.get('Origin') || '*');
+    res.header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS, HEAD');
+    res.header('Access-Control-Allow-Headers', 'Content-Type, Cache-Control, Pragma, Accept, Accept-Encoding, User-Agent, X-Requested-With');
+    res.header('Access-Control-Allow-Credentials', 'true');
+
     // Headers de cache para Cloudflare (Cache global instantáneo)
     res.set({
       'Cache-Control': 'public, max-age=300, s-maxage=900', // 5min browser, 15min CDN
@@ -290,7 +346,8 @@ app.get('/products', async (req, res) => {
       'Last-Modified': new Date().toUTCString(), // Última modificación
       'X-Cache-Status': 'CACHE-ENABLED', // Header de debug
       'X-Content-Type-Options': 'nosniff', // Seguridad
-      'X-Frame-Options': 'DENY' // Seguridad
+      'X-Frame-Options': 'DENY', // Seguridad
+      'X-CORS-Debug': 'explicit-headers-set'
     });
     
     let query = `
@@ -398,6 +455,37 @@ app.get('/sync-status', async (req, res) => {
       details: error.message 
     });
   }
+});
+
+// 🔹 Endpoint de test CORS para debugging
+app.get('/cors-test', (req, res) => {
+  console.log('🧪 CORS Test request received');
+
+  // Headers CORS explícitos máximos
+  res.header('Access-Control-Allow-Origin', req.get('Origin') || '*');
+  res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS, HEAD, PATCH');
+  res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, Cache-Control, Pragma, Accept, Accept-Encoding, User-Agent, X-Requested-With, Origin, Referer, If-None-Match, If-Modified-Since');
+  res.header('Access-Control-Expose-Headers', 'Cache-Control, ETag, Last-Modified, X-Cache-Status, CF-Cache-Tag');
+  res.header('Access-Control-Allow-Credentials', 'true');
+
+  res.set({
+    'Cache-Control': 'no-cache, no-store, must-revalidate',
+    'X-CORS-Test': 'success',
+    'X-CORS-Debug': 'test-endpoint'
+  });
+
+  res.json({
+    success: true,
+    message: 'CORS Test successful',
+    request_info: {
+      origin: req.get('Origin'),
+      user_agent: req.get('User-Agent'),
+      method: req.method,
+      headers: req.headers,
+      query: req.query
+    },
+    timestamp: new Date().toISOString()
+  });
 });
 
 // 🔹 Endpoint para limpeza de cache Cloudflare (útil após sincronização)
